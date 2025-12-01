@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Files</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+<h1>Log Files</h1>
+
+<div class="card">
+  <h2>Stored Logs</h2>
+  <div id="fileList" class="loader"></div>
+</div>
+
+<a class="btn" href="index.html">Home</a>
+
+<script>
+function loadFiles() {
+  fetch("/list").then(r => r.text()).then(txt => {
+    let lines = txt.trim().split("\n");
+    let html = "";
+
+    lines.forEach(name => {
+      if (name.length > 0) {
+        html += `
+          <div class='card'>
+            <b>${name}</b><br>
+            <a class='btn' href='/download?name=${name}'>Download</a>
+          </div>
+        `;
+      }
+    });
+
+    document.getElementById("fileList").innerHTML = html;
+  });
+}
+loadFiles();
+</script>
+
+</body>
+</html>

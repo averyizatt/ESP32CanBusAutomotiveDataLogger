@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Logger Dashboard</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="script.js"></script>
+</head>
+
+<body>
+
+<h1>Logger Dashboard</h1>
+
+<div class="card">
+  <h2>Status</h2>
+  <div id="statusBlock" class="loader"></div>
+</div>
+
+<div class="card">
+  <h2>Live Data</h2>
+  <table class="table">
+    <tr><td>Latitude</td><td id="lat">--</td></tr>
+    <tr><td>Longitude</td><td id="lon">--</td></tr>
+    <tr><td>Speed (mph)</td><td id="mph">--</td></tr>
+    <tr><td>Satellites</td><td id="sats">--</td></tr>
+    <tr><td>CAN Frames</td><td id="frames">--</td></tr>
+  </table>
+</div>
+
+<div class="nav">
+  <a class="btn" href="can.html">CAN</a>
+  <a class="btn" href="gps.html">GPS</a>
+  <a class="btn" href="files.html">Files</a>
+  <a class="btn" href="wifi.html">WiFi</a>
+  <a class="btn" href="ota.html">OTA</a>
+</div>
+
+</body>
+</html>
