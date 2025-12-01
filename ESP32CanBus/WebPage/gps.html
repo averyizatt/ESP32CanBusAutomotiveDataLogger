@@ -1,14 +1,47 @@
-<html><head>
-<link rel="stylesheet" href="/style.css">
-<title>GPS</title>
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width,initial-scale=1">
+	<title>GPS Info</title>
+	<link rel="stylesheet" href="style.css">
+	<script defer src="script.js"></script>
 </head>
 <body>
+	<div class="wrap">
+		<header class="site-header">
+			<div class="brand">
+				<div class="logo" aria-hidden></div>
+				<div>
+					<h1>GPS Info</h1>
+					<p class="muted">Location & Satellites</p>
+				</div>
+			</div>
+			<nav>
+				<button id="navToggle" class="nav-toggle">☰</button>
+				<div class="nav">
+					<a href="index.html">Dashboard</a>
+					<a href="can.html">CAN</a>
+					<a href="files.html">Files</a>
+				</div>
+			</nav>
+		</header>
 
-<h1>GPS Info</h1>
+		<main>
+			<section class="card">
+				<h2>Position</h2>
+				<table class="table">
+					<tr><td>Latitude</td><td id="lat">--</td></tr>
+					<tr><td>Longitude</td><td id="lon">--</td></tr>
+					<tr><td>Speed (mph)</td><td id="mph">--</td></tr>
+					<tr><td>Satellites</td><td id="sats">--</td></tr>
+				</table>
+			</section>
 
-<div class="box">
-Loading…
-</div>
-
-<a class="btn" href="/">Back</a>
-</body></html>
+			<footer>
+				<a class="btn" href="index.html">Back</a>
+			</footer>
+		</main>
+	</div>
+</body>
+</html>

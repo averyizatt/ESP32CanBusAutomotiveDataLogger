@@ -1,38 +1,56 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="en">
 <head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Logger Dashboard</title>
   <link rel="stylesheet" href="style.css">
-  <script src="script.js"></script>
+  <script defer src="script.js"></script>
+  <meta name="description" content="ESP32 CAN Bus data logger dashboard">
 </head>
-
 <body>
+  <div class="wrap">
+    <header class="site-header">
+      <div class="brand">
+        <div class="logo" aria-hidden></div>
+        <div>
+          <h1>CAN Logger</h1>
+          <p class="muted">Vehicle data logger — dashboard</p>
+        </div>
+      </div>
+      <nav>
+        <button id="navToggle" class="nav-toggle" aria-expanded="false">☰</button>
+        <div class="nav">
+          <a href="can.html">CAN</a>
+          <a href="gps.html">GPS</a>
+          <a href="files.html">Files</a>
+          <a href="wifi.html">WiFi</a>
+          <a href="ota.html">OTA</a>
+        </div>
+      </nav>
+    </header>
 
-<h1>Logger Dashboard</h1>
+    <main>
+      <section class="card">
+        <h2>Status</h2>
+        <p id="statusBlock" class="muted">Loading…</p>
+      </section>
 
-<div class="card">
-  <h2>Status</h2>
-  <div id="statusBlock" class="loader"></div>
-</div>
+      <section class="card">
+        <h2>Live Data</h2>
+        <table class="table" aria-live="polite">
+          <tr><td>Latitude</td><td id="lat">--</td></tr>
+          <tr><td>Longitude</td><td id="lon">--</td></tr>
+          <tr><td>Speed (mph)</td><td id="mph">--</td></tr>
+          <tr><td>Satellites</td><td id="sats">--</td></tr>
+          <tr><td>CAN Frames</td><td id="frames">--</td></tr>
+        </table>
+      </section>
 
-<div class="card">
-  <h2>Live Data</h2>
-  <table class="table">
-    <tr><td>Latitude</td><td id="lat">--</td></tr>
-    <tr><td>Longitude</td><td id="lon">--</td></tr>
-    <tr><td>Speed (mph)</td><td id="mph">--</td></tr>
-    <tr><td>Satellites</td><td id="sats">--</td></tr>
-    <tr><td>CAN Frames</td><td id="frames">--</td></tr>
-  </table>
-</div>
-
-<div class="nav">
-  <a class="btn" href="can.html">CAN</a>
-  <a class="btn" href="gps.html">GPS</a>
-  <a class="btn" href="files.html">Files</a>
-  <a class="btn" href="wifi.html">WiFi</a>
-  <a class="btn" href="ota.html">OTA</a>
-</div>
-
+      <footer>
+        <small class="muted">ESP32 CAN Logger — local web UI</small>
+      </footer>
+    </main>
+  </div>
 </body>
 </html>

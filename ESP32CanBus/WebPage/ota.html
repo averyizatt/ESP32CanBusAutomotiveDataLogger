@@ -1,18 +1,42 @@
-<html><head>
-<link rel="stylesheet" href="/style.css">
-<title>OTA</title>
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width,initial-scale=1">
+	<title>OTA Update</title>
+	<link rel="stylesheet" href="style.css">
 </head>
 <body>
+	<div class="wrap">
+		<header class="site-header">
+			<div class="brand">
+				<div class="logo" aria-hidden></div>
+				<div>
+					<h1>OTA Update</h1>
+					<p class="muted">Upload firmware for the device</p>
+				</div>
+			</div>
+			<nav>
+				<button id="navToggle" class="nav-toggle">☰</button>
+				<div class="nav">
+					<a href="index.html">Dashboard</a>
+				</div>
+			</nav>
+		</header>
 
-<h1>OTA Update</h1>
+		<main>
+			<section class="card">
+				<form method="POST" action="/update" enctype="multipart/form-data">
+					<label class="muted">Firmware file</label>
+					<input type="file" name="firmware">
+					<div style="margin-top:12px"><button class="btn">Upload Firmware</button></div>
+				</form>
+			</section>
 
-<div class="box">
-<form method="POST" action="/update" enctype="multipart/form-data">
-<input type="file" name="firmware" style="width:100%;font-size:18px;margin-bottom:20px;">
-<button>Upload Firmware</button>
-</form>
-</div>
-
-<a class="btn" href="/">Back</a>
-
-</body></html>
+			<footer>
+				<a class="btn" href="index.html">Back</a>
+			</footer>
+		</main>
+	</div>
+</body>
+</html>

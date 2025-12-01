@@ -1,21 +1,48 @@
-<html><head>
-<link rel="stylesheet" href="/style.css">
-<title>WiFi Setup</title>
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width,initial-scale=1">
+	<title>WiFi Setup</title>
+	<link rel="stylesheet" href="style.css">
+	<script defer src="script.js"></script>
 </head>
 <body>
+	<div class="wrap">
+		<header class="site-header">
+			<div class="brand">
+				<div class="logo" aria-hidden></div>
+				<div>
+					<h1>WiFi Setup</h1>
+					<p class="muted">Add networks for the logger to use</p>
+				</div>
+			</div>
+			<nav>
+				<button id="navToggle" class="nav-toggle">☰</button>
+				<div class="nav">
+					<a href="index.html">Dashboard</a>
+					<a href="files.html">Files</a>
+				</div>
+			</nav>
+		</header>
 
-<h1>WiFi Setup</h1>
+		<main>
+			<section class="card">
+				<form action="/addwifi" method="GET">
+					<label class="muted">SSID</label>
+					<input name="ssid" type="text" placeholder="Network name">
+					<label class="muted" style="margin-top:8px">Password</label>
+					<input name="pass" type="password" placeholder="Password (optional)">
+					<div style="margin-top:12px">
+						<button class="btn">Add Network</button>
+					</div>
+				</form>
+			</section>
 
-<div class="box">
-<form action="/addwifi">
-SSID:<br>
-<input name="ssid" style="width:100%;font-size:18px;"><br>
-PASS:<br>
-<input name="pass" style="width:100%;font-size:18px;"><br><br>
-<button>Add Network</button>
-</form>
-</div>
-
-<a class="btn" href="/">Back</a>
-
-</body></html>
+			<footer>
+				<a class="btn" href="index.html">Back</a>
+			</footer>
+		</main>
+	</div>
+</body>
+</html>

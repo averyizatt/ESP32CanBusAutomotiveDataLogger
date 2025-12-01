@@ -1,43 +1,58 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="en">
 <head>
-  <title>Files</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Log Files</title>
   <link rel="stylesheet" href="style.css">
+  <script defer src="script.js"></script>
 </head>
-
 <body>
+  <div class="wrap">
+    <header class="site-header">
+      <div class="brand">
+        <div class="logo" aria-hidden></div>
+        <div>
+          <h1>Log Files</h1>
+          <p class="muted">Stored recordings on the SD</p>
+        </div>
+      </div>
+      <nav>
+        <button id="navToggle" class="nav-toggle">☰</button>
+        <div class="nav">
+          <a href="index.html">Dashboard</a>
+          <a href="can.html">CAN</a>
+          <a href="gps.html">GPS</a>
+        </div>
+      </nav>
+    </header>
 
-<h1>Log Files</h1>
+    <main>
+      <section class="card">
+        <h2>Stored Logs</h2>
+        <div id="fileList" class="muted">Loading…</div>
+      </section>
 
-<div class="card">
-  <h2>Stored Logs</h2>
-  <div id="fileList" class="loader"></div>
-</div>
+      <footer>
+        <a class="btn" href="index.html">Home</a>
+      </footer>
+    </main>
+  </div>
 
-<a class="btn" href="index.html">Home</a>
-
-<script>
-function loadFiles() {
-  fetch("/list").then(r => r.text()).then(txt => {
-    let lines = txt.trim().split("\n");
-    let html = "";
-
-    lines.forEach(name => {
-      if (name.length > 0) {
-        html += `
-          <div class='card'>
-            <b>${name}</b><br>
-            <a class='btn' href='/download?name=${name}'>Download</a>
-          </div>
-        `;
-      }
-    });
-
-    document.getElementById("fileList").innerHTML = html;
-  });
-}
-loadFiles();
-</script>
-
+  <script>
+  function loadFiles() {
+    fetch('/list').then(r => r.text()).then(txt => {
+      let lines = txt.trim().split('\n');
+      let html = '';
+      lines.forEach(name => {
+        if (name.length > 0) {
+          html += `\n<div class='card'><div><strong>${name}</strong></div><div style="margin-top:8px"><a class='btn' href='/download?name=${encodeURIComponent(name)}'>Download</a></div></div>`;
+        }
+      });
+      document.getElementById('fileList').innerHTML = html || '<div class="muted">No files found</div>';
+    }).catch(()=>{ document.getElementById('fileList').innerHTML = '<div class="muted">Unable to load files</div>';});
+  }
+  loadFiles();
+  </script>
 </body>
 </html>

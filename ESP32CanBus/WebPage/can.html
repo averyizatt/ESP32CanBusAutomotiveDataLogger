@@ -1,28 +1,49 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="en">
 <head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>CAN Data</title>
   <link rel="stylesheet" href="style.css">
-  <script src="script.js"></script>
+  <script defer src="script.js"></script>
 </head>
-
 <body>
+  <div class="wrap">
+    <header class="site-header">
+      <div class="brand">
+        <div class="logo" aria-hidden></div>
+        <div>
+          <h1>CAN Frames</h1>
+          <p class="muted">Live CAN bus frames</p>
+        </div>
+      </div>
+      <nav>
+        <button id="navToggle" class="nav-toggle">☰</button>
+        <div class="nav">
+          <a href="index.html">Dashboard</a>
+          <a href="gps.html">GPS</a>
+          <a href="files.html">Files</a>
+        </div>
+      </nav>
+    </header>
 
-<h1>CAN Data</h1>
+    <main>
+      <section class="card">
+        <h2>Status</h2>
+        <p id="statusBlock" class="muted">Loading…</p>
+      </section>
 
-<div class="card">
-  <h2>Status</h2>
-  <div id="statusBlock" class="loader"></div>
-</div>
+      <section class="card">
+        <h2>CAN Frames</h2>
+        <table class="table" aria-live="polite">
+          <tr><td>Frames</td><td id="frames">--</td></tr>
+        </table>
+      </section>
 
-<div class="card">
-  <h2>CAN Frames</h2>
-  <table class="table">
-    <tr><td>Frames</td><td id="frames">--</td></tr>
-  </table>
-</div>
-
-<a href="index.html" class="btn">Home</a>
-
+      <footer>
+        <a class="btn" href="index.html">Back</a>
+      </footer>
+    </main>
+  </div>
 </body>
 </html>

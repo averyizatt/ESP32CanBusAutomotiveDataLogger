@@ -1,15 +1,38 @@
-<html><head>
-<link rel="stylesheet" href="/style.css">
-<title>Settings</title>
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width,initial-scale=1">
+	<title>Settings</title>
+	<link rel="stylesheet" href="style.css">
 </head>
 <body>
+	<div class="wrap">
+		<header class="site-header">
+			<div class="brand">
+				<div class="logo" aria-hidden></div>
+				<div>
+					<h1>Settings</h1>
+					<p class="muted">Device configuration</p>
+				</div>
+			</div>
+			<nav>
+				<button id="navToggle" class="nav-toggle">☰</button>
+				<div class="nav">
+					<a href="index.html">Dashboard</a>
+				</div>
+			</nav>
+		</header>
 
-<h1>Settings</h1>
+		<main>
+			<section class="card">
+				<p>IAT and CLT limits are fixed for now. More settings coming soon.</p>
+			</section>
 
-<div class="box">
-IAT and CLT limits are fixed for now.<br>
-More settings coming soon.
-</div>
-
-<a class="btn" href="/">Back</a>
-</body></html>
+			<footer>
+				<a class="btn" href="index.html">Back</a>
+			</footer>
+		</main>
+	</div>
+</body>
+</html>
