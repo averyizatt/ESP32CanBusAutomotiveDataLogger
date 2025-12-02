@@ -26,12 +26,14 @@
 #include <Update.h>
 #include <ArduinoJson.h>
 #include <SPIFFS.h>
+#include <time.h>
 
 // ------------------------------
 // OLED
 // ------------------------------
 #define OLED_ADDR 0x3C
 Adafruit_SSD1306 display(128, 32, &Wire, -1);
+bool OLED_INITED = false;
 
 // Character based scrolling for 3 lines
 const int OLED_CHARS_PER_LINE = 20;       // ~20 chars fit at textSize=1
@@ -75,11 +77,154 @@ int iat = 0;
 float batt = 0;
 
 // ------------------------------
+// Recent frames ring buffer
+// ------------------------------
+#define MAX_FRAME_LIST 96
+struct FrameRecord { unsigned long id; char data[80]; unsigned long ts; };
+FrameRecord framesBuf[MAX_FRAME_LIST];
+int framesHead = 0; // next write index
+unsigned long framesTotal = 0; // total pushed
+
+void pushFrame(unsigned long id, const byte* buf, byte len) {
+  int idx = framesHead % MAX_FRAME_LIST;
+  framesBuf[idx].id = id;
+  // format data as hex
+  int p = 0;
+  for (byte i = 0; i < len && p < (int)(sizeof(framesBuf[idx].data) - 4); ++i) {
+    sprintf(&framesBuf[idx].data[p], "%02X ", buf[i]);
+    p += 3;
+  }
+  if (p > 0 && p < (int)sizeof(framesBuf[idx].data)) framesBuf[idx].data[p-1] = '\0'; else framesBuf[idx].data[p] = '\0';
+  framesBuf[idx].ts = getTimeSeconds();
+  framesHead++;
+  framesTotal++;
+}
+
+// ------------------------------
 // WiFi / SPIFFS
 // ------------------------------
 WebServer server(80);
 bool WIFIOK = false;
 String wifiFile = "/wifi.json";
+String adminTokenFile = "/admin.token";
+
+// ------------------------------
+// Security helpers
+// ------------------------------
+// derive simple XOR key from chip MAC
+void deriveKey(uint8_t *key, size_t len) {
+  uint64_t mac = ESP.getEfuseMac();
+  for (size_t i = 0; i < len; ++i) key[i] = (mac >> ((i % 8) * 8)) & 0xFF;
+}
+
+String toHex(const uint8_t *data, size_t len) {
+  String s;
+  s.reserve(len * 2 + 1);
+  const char hex[] = "0123456789ABCDEF";
+  for (size_t i = 0; i < len; ++i) {
+    s += hex[(data[i] >> 4) & 0x0F];
+    s += hex[data[i] & 0x0F];
+  }
+  return s;
+}
+
+// convert hex string to bytes; returns length
+size_t hexToBytes(const String &hex, uint8_t *out, size_t maxOut) {
+  size_t hlen = hex.length();
+  size_t cnt = 0;
+  for (size_t i = 0; i + 1 < hlen && cnt < maxOut; i += 2) {
+    char a = hex.charAt(i);
+    char b = hex.charAt(i+1);
+    auto val = [](char c)->int { if (c>='0' && c<='9') return c-'0'; if (c>='A' && c<='F') return c-'A'+10; if (c>='a'&&c<='f') return c-'a'+10; return 0; };
+    out[cnt++] = (val(a) << 4) | val(b);
+  }
+  return cnt;
+}
+
+String encryptString(const String &plain) {
+  if (plain.length() == 0) return String("");
+  size_t n = plain.length();
+  uint8_t key[8]; deriveKey(key, sizeof(key));
+  uint8_t *buf = (uint8_t*)malloc(n);
+  for (size_t i = 0; i < n; ++i) buf[i] = ((uint8_t)plain.charAt(i)) ^ key[i % 8];
+  String h = toHex(buf, n);
+  free(buf);
+  return String("enc:") + h;
+}
+
+String decryptString(const String &cipher) {
+  if (!cipher.startsWith("enc:")) return cipher; // already plain
+  String hex = cipher.substring(4);
+  size_t hlen = hex.length() / 2;
+  uint8_t *buf = (uint8_t*)malloc(hlen);
+  size_t got = hexToBytes(hex, buf, hlen);
+  uint8_t key[8]; deriveKey(key, sizeof(key));
+  String out;
+  out.reserve(got+1);
+  for (size_t i = 0; i < got; ++i) {
+    char c = (char)(buf[i] ^ key[i % 8]);
+    out += c;
+  }
+  free(buf);
+  return out;
+}
+
+// admin token helpers
+void ensureAdminTokenExists() {
+  if (SPIFFS.exists(adminTokenFile)) return;
+  // generate token using esp_random
+  uint8_t t[16];
+  for (int i = 0; i < 16; ++i) {
+    uint32_t r = esp_random();
+    t[i] = (r >> (8 * (i % 4))) & 0xFF;
+  }
+  String tok = toHex(t, 16);
+  File f = SPIFFS.open(adminTokenFile, FILE_WRITE);
+  if (f) { f.print(tok); f.close(); /* do not print token to serial to avoid exposure */ }
+}
+
+// helper: convert 3-letter month name to month number (1-12)
+int monthFromName(const char *m) {
+  const char *months[] = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+  for (int i = 0; i < 12; ++i) {
+    if (strncmp(m, months[i], 3) == 0) return i + 1;
+  }
+  return 1;
+}
+
+String readAdminToken() {
+  if (!SPIFFS.exists(adminTokenFile)) return String("");
+  File f = SPIFFS.open(adminTokenFile, FILE_READ);
+  if (!f) return String("");
+  String t; while (f.available()) t += (char)f.read(); f.close();
+  return t;
+}
+
+bool checkAuth() {
+  // check header X-Auth-Token or Authorization: Bearer or form arg token
+  String provided = String("");
+  if (server.hasHeader("X-Auth-Token")) provided = server.header("X-Auth-Token");
+  else if (server.hasHeader("Authorization")) {
+    String a = server.header("Authorization");
+    if (a.startsWith("Bearer ")) provided = a.substring(7);
+  }
+  if (provided.length() == 0 && server.hasArg("token")) provided = server.arg("token");
+  String real = readAdminToken();
+  // If token matches stored token, OK
+  if (real.length() > 0 && provided.equals(real)) return true;
+
+  // Allow local LAN clients (same /24) to access without token so device is "boot ready"
+  IPAddress rem = server.client().remoteIP();
+  IPAddress loc = WiFi.localIP();
+  // accept loopback or exact match
+  // INADDR_ANY is not available in ESP32 Arduino; compare against 0.0.0.0 instead
+  if (rem == IPAddress(0,0,0,0) || rem == loc) return true;
+  // compare first 3 octets (/24)
+  if (rem[0] == loc[0] && rem[1] == loc[1] && rem[2] == loc[2]) return true;
+
+  // otherwise unauthorized
+  return false;
+}
 
 // ------------------------------
 // GPS state
@@ -123,19 +268,58 @@ unsigned long getTimeSeconds() {
 // Trip file helpers (SD)
 // ------------------------------
 String nextTripName() {
-  while (true) {
-    String name = "/trip";
-    if (tripNumber < 10) name += "00";
-    else if (tripNumber < 100) name += "0";
-    name += String(tripNumber) + ".csv";
-
-    if (!SD.exists(name)) return name;
-    tripNumber++;
+  // Deprecated: kept for compatibility but prefer nextTripPath
+  return String("/trip000.csv");
+}
+// create logs directory and date folder, return next trip path
+String nextTripPath() {
+  // determine date folder
+  time_t secs = 0;
+  if (timeValid) {
+    secs = (time_t)getTimeSeconds();
+  } else {
+    // fallback: use compile/build date (__DATE__) to avoid 1970-01-01
+    // __DATE__ format: "Mmm dd yyyy" (e.g. "Dec  1 2025")
+    const char *bd = __DATE__;
+    char mon[4] = {0};
+    int day = 1;
+    int year = 1970;
+    if (sscanf(bd, "%3s %d %d", mon, &day, &year) >= 3) {
+      int m = monthFromName(mon); // 1-12
+      struct tm bt;
+      memset(&bt, 0, sizeof(bt));
+      bt.tm_year = year - 1900;
+      bt.tm_mon = m - 1;
+      bt.tm_mday = day;
+      bt.tm_hour = 0;
+      bt.tm_min = 0;
+      bt.tm_sec = 0;
+      secs = mktime(&bt);
+    } else {
+      secs = (time_t)(millis() / 1000);
+    }
   }
+  struct tm t;
+  gmtime_r(&secs, &t);
+  char dateDir[32];
+  snprintf(dateDir, sizeof(dateDir), "/logs/%04d-%02d-%02d", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
+
+  // ensure /logs and dateDir exist
+  if (!SD.exists("/logs")) SD.mkdir("/logs");
+  if (!SD.exists(dateDir)) SD.mkdir(dateDir);
+
+  // find next available tripNNN.csv in dateDir
+  for (int n = 1; n < 1000; ++n) {
+    char fname[64];
+    snprintf(fname, sizeof(fname), "%s/trip%03d.csv", dateDir, n);
+    if (!SD.exists(String(fname))) return String(fname);
+  }
+  // fallback
+  return String(dateDir) + String("/trip999.csv");
 }
 
 void startNewTrip() {
-  String fname = nextTripName();
+  String fname = nextTripPath();
   Serial.print("Opening trip file: ");
   Serial.println(fname);
 
@@ -169,6 +353,30 @@ void ensureWifiJsonExists() {
   }
 }
 
+// recursively append files under a path into out (relative names without leading slash)
+void appendFilesInDir(const String &path, String &out) {
+  File dir = SD.open(path);
+  if (!dir) return;
+  File entry = dir.openNextFile();
+  while (entry) {
+    String name = String(entry.name());
+    if (entry.isDirectory()) {
+      // recurse into directory
+      appendFilesInDir(name, out);
+    } else {
+      String n = name;
+      if (n.startsWith("/")) n = n.substring(1);
+      out += n + "\n";
+    }
+    entry.close();
+    entry = dir.openNextFile();
+  }
+  dir.close();
+}
+
+bool otaAuthorized = false;
+
+
 bool connectSavedNetworks() {
   if (!SPIFFS.exists(wifiFile)) {
     Serial.println("wifi.json missing, cannot connect to saved networks");
@@ -200,6 +408,7 @@ bool connectSavedNetworks() {
   for (JsonObject o : arr) {
     String ss = o["ssid"].as<String>();
     String pw = o["pass"].as<String>();
+    pw = decryptString(pw);
 
     Serial.print("Trying WiFi: ");
     Serial.println(ss);
@@ -237,6 +446,11 @@ void startAPMode() {
   Serial.print("AP mode, IP: ");
   Serial.println(ip);
   WIFIOK = false;
+  if (OLED_INITED) {
+    String msg = String("AP mode IP: ") + ip.toString();
+    bootMessage(msg);
+    delay(5000);
+  }
 }
 
 // ------------------------------
@@ -290,18 +504,38 @@ String fallbackHome() {
 // SD file serving
 // ------------------------------
 bool serveSDFile(const String &path) {
-  if (!SD.exists(path)) {
+  // Try SPIFFS first (allow embedding web UI into firmware), then fall back to SD card.
+  String p = path;
+  if (p == "/") p = "/index.html";
+
+  // SPIFFS
+  if (SPIFFS.exists(p)) {
+    File f = SPIFFS.open(p, FILE_READ);
+    if (f) {
+      String contentType = "text/plain";
+      if (p.endsWith(".html")) contentType = "text/html";
+      else if (p.endsWith(".css")) contentType = "text/css";
+      else if (p.endsWith(".js")) contentType = "application/javascript";
+      else if (p.endsWith(".csv")) contentType = "text/csv";
+      server.streamFile(f, contentType);
+      f.close();
+      return true;
+    }
+  }
+
+  // SD fallback
+  if (!SD.exists(p)) {
     return false;
   }
 
-  File f = SD.open(path, FILE_READ);
+  File f = SD.open(p, FILE_READ);
   if (!f) return false;
 
   String contentType = "text/plain";
-  if (path.endsWith(".html")) contentType = "text/html";
-  else if (path.endsWith(".css")) contentType = "text/css";
-  else if (path.endsWith(".js")) contentType = "application/javascript";
-  else if (path.endsWith(".csv")) contentType = "text/csv";
+  if (p.endsWith(".html")) contentType = "text/html";
+  else if (p.endsWith(".css")) contentType = "text/css";
+  else if (p.endsWith(".js")) contentType = "application/javascript";
+  else if (p.endsWith(".csv")) contentType = "text/csv";
 
   server.streamFile(f, contentType);
   f.close();
@@ -325,6 +559,11 @@ void handleGenericFile() {
 }
 
 void handleAddWiFi() {
+  if (!checkAuth()) {
+    server.send(401, "text/plain", "Unauthorized");
+    return;
+  }
+
   if (!server.hasArg("ssid") || !server.hasArg("pass")) {
     server.send(400, "text/plain", "Missing ssid/pass");
     return;
@@ -356,7 +595,7 @@ void handleAddWiFi() {
 
   JsonObject obj = arr.createNestedObject();
   obj["ssid"] = ss;
-  obj["pass"] = pw;
+  obj["pass"] = encryptString(pw);
 
   File w = SPIFFS.open(wifiFile, FILE_WRITE);
   if (!w) {
@@ -374,14 +613,22 @@ void handleOTAUpload() {
   HTTPUpload &up = server.upload();
   if (up.status == UPLOAD_FILE_START) {
     Serial.println("OTA: begin");
+    // require auth (token) for OTA
+    otaAuthorized = checkAuth();
+    if (!otaAuthorized) {
+      Serial.println("OTA: unauthorized upload attempt");
+      return;
+    }
     if (!Update.begin()) {
       Serial.println("OTA begin failed");
     }
   } else if (up.status == UPLOAD_FILE_WRITE) {
+    if (!otaAuthorized) return;
     if (Update.write(up.buf, up.currentSize) != up.currentSize) {
       Serial.println("OTA write failed");
     }
   } else if (up.status == UPLOAD_FILE_END) {
+    if (!otaAuthorized) { Serial.println("OTA aborted: unauthorized"); return; }
     if (Update.end(true)) {
       Serial.println("OTA success, rebooting...");
     } else {
@@ -446,18 +693,21 @@ void updateOLED() {
                       "WiFi:" + String(WIFIOK ? "OK" : "NO");
   drawScrollingLine(statusLine, 0, 0);
 
-  // line 1: lat / lon
-  double lat = gps.location.isValid() ? gps.location.lat() : 0.0;
-  double lon = gps.location.isValid() ? gps.location.lng() : 0.0;
-  String latlon = "Lat:" + String(lat, 6) + " Lon:" + String(lon, 6);
-  drawScrollingLine(latlon, 10, 1);
+  // line 1: altitude + satellites (scrolls)
+  double altm = gps.altitude.isValid() ? gps.altitude.meters() : 0.0;
+  double altf = altm * 3.28084;
+  int sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
+  char buf1[64];
+  snprintf(buf1, sizeof(buf1), "Alt:%.1fm %.0fft Sats:%d", altm, altf, sats);
+  drawScrollingLine(String(buf1), 10, 1);
 
-  // line 2: speed / rpm / sats
+  // line 2: uptime + speed & rpm (scrolls)
+  String up = "Uptime:" + formatUptime();
   double kmph = gps.speed.isValid() ? gps.speed.kmph() : fallbackSpeed;
   double mph = kmph * 0.621371;
-  int sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
-  String info = "Speed:" + String(mph, 1) + "mph RPM:" + String(rpm) + " Sat:" + String(sats);
-  drawScrollingLine(info, 20, 2);
+  char buf2[96];
+  snprintf(buf2, sizeof(buf2), "%s Speed:%.1fmph RPM:%d", up.c_str(), mph, rpm);
+  drawScrollingLine(String(buf2), 20, 2);
 
   display.display();
 }
@@ -500,12 +750,14 @@ void setup() {
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
     Serial.println("OLED init failed");
   } else {
+    OLED_INITED = true;
     Serial.println("OLED init OK");
   }
 
   // GPS
   SerialGPS.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
   Serial.println("GPS UART started");
+  if (OLED_INITED) { bootMessage("GPS UART started"); delay(5000); }
 
   // SPIFFS
   Serial.println("Mounting SPIFFS...");
@@ -513,13 +765,22 @@ void setup() {
     Serial.println("SPIFFS mount failed, trying format");
     if (SPIFFS.begin(true)) {
       Serial.println("SPIFFS formatted and mounted");
+      if (OLED_INITED) { bootMessage("SPIFFS formatted and mounted"); delay(5000); }
     } else {
       Serial.println("SPIFFS still failed");
     }
   } else {
     Serial.println("SPIFFS mount OK");
+    if (OLED_INITED) { bootMessage("SPIFFS mount OK"); delay(5000); }
   }
   ensureWifiJsonExists();
+  ensureAdminTokenExists();
+
+  // show startup messages on OLED with 5s pause each (only if OLED initialized)
+  if (OLED_INITED) {
+    bootMessage("=== ESP32 CAN/GPS Logger boot ===");
+    delay(5000);
+  }
 
   // SD
   Serial.println("Starting SD...");
@@ -527,6 +788,7 @@ void setup() {
   SDOK = SD.begin(SD_CS, SPI);
   Serial.print("SD status: ");
   Serial.println(SDOK ? "OK" : "FAIL");
+  if (OLED_INITED) { bootMessage(String("SD status: ") + (SDOK?"OK":"FAIL")); delay(5000); }
   if (SDOK) {
     startNewTrip();
   }
@@ -537,8 +799,10 @@ void setup() {
   if (CANOK) {
     CAN_MICRO.setMode(MCP_NORMAL);
     Serial.println("CAN init OK");
+    if (OLED_INITED) { bootMessage("CAN init OK"); delay(5000); }
   } else {
     Serial.println("CAN init FAIL");
+    if (OLED_INITED) { bootMessage("CAN init FAIL"); delay(5000); }
   }
   pinMode(CAN_INT, INPUT);
 
@@ -546,22 +810,165 @@ void setup() {
   Serial.println("Connecting WiFi...");
   if (connectSavedNetworks()) {
     WIFIOK = true;
+    if (OLED_INITED) { bootMessage("WiFi connected"); delay(5000); }
   } else {
     startAPMode();
   }
 
   // Web routes
   server.on("/", handleRoot);
-  server.on("/addwifi", handleAddWiFi);
+  // support both GET (legacy) and POST (safer) for adding WiFi
+  server.on("/addwifi", HTTP_GET, handleAddWiFi);
+  server.on("/addwifi", HTTP_POST, handleAddWiFi);
   server.on("/update", HTTP_POST, []() {
+    if (!checkAuth()) { server.send(401, "text/plain", "Unauthorized"); return; }
     server.send(200, "text/plain", "OTA done, rebooting");
     delay(500);
     ESP.restart();
   }, handleOTAUpload);
 
+  // API endpoints for UI
+  server.on("/status.json", HTTP_GET, [](){
+    StaticJsonDocument<512> doc;
+    doc["gps"] = GPSOK ? "OK" : "NO";
+    doc["can"] = CANOK ? "OK" : "NO";
+    doc["sd"]  = SDOK ? "OK" : "NO";
+    doc["wifi"] = WIFIOK ? "OK" : "NO";
+    double kmph = gps.speed.isValid() ? gps.speed.kmph() : fallbackSpeed;
+    doc["mph"] = kmph * 0.621371;
+    doc["lat"] = gps.location.isValid() ? gps.location.lat() : 0.0;
+    doc["lon"] = gps.location.isValid() ? gps.location.lng() : 0.0;
+    doc["sats"] = gps.satellites.isValid() ? gps.satellites.value() : 0;
+    doc["frames"] = (unsigned long)canCount;
+    doc["rpm"] = rpm;
+    doc["batt"] = batt;
+    String out; serializeJson(doc, out);
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(200, "application/json", out);
+  });
+
+  server.on("/frames", HTTP_GET, [](){
+    DynamicJsonDocument doc(4096);
+    JsonArray arr = doc.to<JsonArray>();
+    unsigned long total = min((unsigned long)MAX_FRAME_LIST, framesTotal);
+    for (unsigned long i = 0; i < total; ++i) {
+      int idx = (framesHead - 1 - i + MAX_FRAME_LIST) % MAX_FRAME_LIST;
+      JsonObject o = arr.createNestedObject();
+      char idbuf[16]; sprintf(idbuf, "0x%lX", framesBuf[idx].id);
+      o["id"] = idbuf;
+      o["data"] = framesBuf[idx].data;
+      o["ts"] = framesBuf[idx].ts;
+    }
+    String out; serializeJson(doc, out);
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(200, "application/json", out);
+  });
+
+  server.on("/frames.txt", HTTP_GET, [](){
+    String out;
+    unsigned long total = min((unsigned long)MAX_FRAME_LIST, framesTotal);
+    for (unsigned long i = 0; i < total; ++i) {
+      int idx = (framesHead - 1 - i + MAX_FRAME_LIST) % MAX_FRAME_LIST;
+      out += String("0x") + String(framesBuf[idx].id, HEX) + "|" + String(framesBuf[idx].data) + "|" + String(framesBuf[idx].ts) + "\n";
+    }
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(200, "text/plain", out);
+  });
+
+  server.on("/list", HTTP_GET, [](){
+    // list files under /logs recursively
+    String out;
+    if (!SD.exists("/logs")) { server.sendHeader("Access-Control-Allow-Origin", "*"); server.send(200, "text/plain", ""); return; }
+    File root = SD.open("/logs");
+    if (!root) { server.send(500, "text/plain", "SD open failed"); return; }
+    // recursive traversal using helper
+    appendFilesInDir(String("/logs"), out);
+    root.close();
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(200, "text/plain", out);
+  });
+
+  server.on("/download", HTTP_GET, [](){
+    if (!server.hasArg("name")) { server.send(400, "text/plain", "name required"); return; }
+    String name = server.arg("name");
+    if (!name.startsWith("/")) name = "/" + name;
+    if (!SD.exists(name)) { server.send(404, "text/plain", "not found"); return; }
+    File f = SD.open(name, FILE_READ);
+    if (!f) { server.send(500, "text/plain", "open failed"); return; }
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.streamFile(f, "application/octet-stream");
+    f.close();
+  });
+
+  // WiFi management helpers
+  server.on("/wifi/list", HTTP_GET, [](){
+    if (!SPIFFS.exists(wifiFile)) { server.sendHeader("Access-Control-Allow-Origin", "*"); server.send(200, "application/json", "{}" ); return; }
+    File f = SPIFFS.open(wifiFile, FILE_READ);
+    if (!f) { server.send(500, "text/plain", "open failed"); return; }
+    StaticJsonDocument<512> doc; DeserializationError err = deserializeJson(doc, f); f.close();
+    if (err) { server.send(500, "text/plain", "parse error"); return; }
+    JsonArray arr = doc["networks"].as<JsonArray>();
+    DynamicJsonDocument outDoc(512);
+    JsonArray outArr = outDoc.to<JsonArray>();
+    for (JsonObject o : arr) {
+      JsonObject no = outArr.createNestedObject();
+      no["ssid"] = String((const char*)o["ssid"]);
+      no["pass"] = "****"; // mask
+    }
+    String out; serializeJson(outArr, out);
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(200, "application/json", out);
+  });
+
+  server.on("/wifi/delete", HTTP_GET, [](){
+    if (!checkAuth()) { server.send(401, "text/plain", "Unauthorized"); return; }
+    if (!server.hasArg("ssid")) { server.send(400, "text/plain", "ssid required"); return; }
+    String ss = server.arg("ssid");
+    File f = SPIFFS.open(wifiFile, FILE_READ);
+    if (!f) { server.send(500, "text/plain", "open failed"); return; }
+    StaticJsonDocument<512> doc; DeserializationError err = deserializeJson(doc, f); f.close();
+    if (err) { server.send(500, "text/plain", "parse error"); return; }
+    JsonArray arr = doc["networks"].as<JsonArray>();
+    for (int i = arr.size()-1; i >= 0; --i) { if (String((const char*)arr[i]["ssid"]) == ss) arr.remove(i); }
+    File w = SPIFFS.open(wifiFile, FILE_WRITE); if (!w) { server.send(500, "text/plain", "write failed"); return; }
+    serializeJson(doc, w); w.close();
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(200, "application/json", "{}" );
+  });
+
+  server.on("/wifi/connect", HTTP_GET, [](){
+    if (!checkAuth()) { server.send(401, "text/plain", "Unauthorized"); return; }
+    if (!server.hasArg("ssid")) { server.send(400, "text/plain", "ssid required"); return; }
+    String ss = server.arg("ssid");
+    File f = SPIFFS.open(wifiFile, FILE_READ);
+    if (!f) { server.send(500, "text/plain", "open failed"); return; }
+    StaticJsonDocument<512> doc; deserializeJson(doc, f); f.close();
+    JsonArray arr = doc["networks"].as<JsonArray>();
+    String pass="";
+    for (JsonObject o : arr) { if (String((const char*)o["ssid"]) == ss) pass = String((const char*)o["pass"]); }
+    if (pass.length()==0) { server.send(404, "text/plain", "not found"); return; }
+    pass = decryptString(pass);
+    WiFi.disconnect(true); delay(200);
+    WiFi.begin(ss.c_str(), pass.c_str());
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(200, "application/json", "{\"result\":\"connecting\"}");
+  });
+
+  server.on("/wifi/status", HTTP_GET, [](){
+    StaticJsonDocument<256> doc;
+    doc["connected"] = (WiFi.status() == WL_CONNECTED);
+    doc["ssid"] = WiFi.SSID();
+    doc["ip"] = WiFi.localIP().toString();
+    doc["rssi"] = WiFi.RSSI();
+    String out; serializeJson(doc, out);
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(200, "application/json", out);
+  });
+
   server.onNotFound(handleGenericFile);
   server.begin();
   Serial.println("HTTP server started");
+  if (OLED_INITED) { bootMessage("HTTP server started"); delay(5000); }
 
   updateOLED();
 }
@@ -607,6 +1014,8 @@ void loop() {
 
       lastCanMsg = now;
       canCount++;
+      // push into recent frames buffer for web UI
+      pushFrame(id, buf, len);
     }
   }
 

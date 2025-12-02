@@ -17,7 +17,6 @@
 				</div>
 			</div>
 			<nav>
-				<button id="navToggle" class="nav-toggle">☰</button>
 				<div class="nav">
 					<a href="index.html">Dashboard</a>
 				</div>
@@ -29,6 +28,8 @@
 				<form method="POST" action="/update" enctype="multipart/form-data">
 					<label class="muted">Firmware file</label>
 					<input type="file" name="firmware">
+					<label class="muted" style="margin-top:8px">Admin Token</label>
+					<input name="token" type="text" placeholder="Paste admin token here">
 					<div style="margin-top:12px"><button class="btn">Upload Firmware</button></div>
 				</form>
 			</section>

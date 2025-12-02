@@ -18,7 +18,6 @@
 				</div>
 			</div>
 			<nav>
-				<button id="navToggle" class="nav-toggle">☰</button>
 				<div class="nav">
 					<a href="index.html">Dashboard</a>
 					<a href="files.html">Files</a>
@@ -28,11 +27,13 @@
 
 		<main>
 			<section class="card">
-				<form action="/addwifi" method="GET">
+				<form action="/addwifi" method="POST">
 					<label class="muted">SSID</label>
 					<input name="ssid" type="text" placeholder="Network name">
 					<label class="muted" style="margin-top:8px">Password</label>
 					<input name="pass" type="password" placeholder="Password (optional)">
+					<label class="muted" style="margin-top:8px">Admin Token (required)</label>
+					<input name="token" type="text" placeholder="Paste admin token here">
 					<div style="margin-top:12px">
 						<button class="btn">Add Network</button>
 					</div>
