@@ -1,10 +1,16 @@
 /*
-  ESP32 CAN/GPS Logger
-  Neon HUD UI (SD-hosted)
-  SPIFFS wifi.json
-  OLED 128x32 status strip
-  CAN, GPS, SD logging
-  Web dashboard with fallback internal pages
+  ESP32 CAN / GPS Logger
+  - GPS via TinyGPSPlus
+  - CAN via MCP2515 (MCP_CAN)
+  - SD card for logs and web files
+  - SPIFFS for wifi.json
+  - WebServer: serves index.html, css, js, etc from SD
+  - OTA firmware upload (/update)
+  - OLED 128x32 status with scrolling lines
+  - mDNS: http://logger.local (when STA connected)
+
+  Board: ESP32 Dev Module
+  Partition scheme: Default 4MB with spiffs
 */
 
 #include <TinyGPSPlus.h>
@@ -16,16 +22,22 @@
 #include <Adafruit_SSD1306.h>
 #include <WiFi.h>
 #include <WebServer.h>
-#include <ArduinoJson.h>
+#include <ESPmDNS.h>
 #include <Update.h>
+#include <ArduinoJson.h>
 #include <SPIFFS.h>
-
-#define OLED_ADDR 0x3C
 
 // ------------------------------
 // OLED
 // ------------------------------
+#define OLED_ADDR 0x3C
 Adafruit_SSD1306 display(128, 32, &Wire, -1);
+
+// Character based scrolling for 3 lines
+const int OLED_CHARS_PER_LINE = 20;       // ~20 chars fit at textSize=1
+int lineOffset[3] = {0, 0, 0};
+unsigned long lineLastStep[3] = {0, 0, 0};
+const unsigned long SCROLL_INTERVAL = 500;  // ms between scroll steps
 
 // ------------------------------
 // GPS
@@ -54,7 +66,7 @@ unsigned long lastCanMsg = 0;
 unsigned long canTimeout = 1500;
 unsigned long canCount = 0;
 
-// CAN data
+// CAN decoded data
 int rpm = 0;
 int mapv = 0;
 int tps = 0;
@@ -63,14 +75,14 @@ int iat = 0;
 float batt = 0;
 
 // ------------------------------
-// WIFI/SPIFFS
+// WiFi / SPIFFS
 // ------------------------------
 WebServer server(80);
 bool WIFIOK = false;
 String wifiFile = "/wifi.json";
 
 // ------------------------------
-// GPS handling
+// GPS state
 // ------------------------------
 unsigned long lastGpsFix = 0;
 double fallbackSpeed = 0;
@@ -84,7 +96,7 @@ unsigned long writeRate = 1000;
 int tripNumber = 1;
 
 // ------------------------------
-// TIME
+// Time
 // ------------------------------
 bool timeValid = false;
 unsigned long baseMillis = 0;
@@ -103,12 +115,12 @@ unsigned long getTimeSeconds() {
     baseMillis = millis();
     timeValid = true;
   }
-  if (!timeValid) return millis()/1000;
-  return baseSeconds + (millis() - baseMillis)/1000;
+  if (!timeValid) return millis() / 1000;
+  return baseSeconds + (millis() - baseMillis) / 1000;
 }
 
 // ------------------------------
-// FILE HELPERS
+// Trip file helpers (SD)
 // ------------------------------
 String nextTripName() {
   while (true) {
@@ -124,199 +136,348 @@ String nextTripName() {
 
 void startNewTrip() {
   String fname = nextTripName();
-  logFile = SD.open(fname, FILE_WRITE);
+  Serial.print("Opening trip file: ");
+  Serial.println(fname);
 
+  logFile = SD.open(fname, FILE_WRITE);
   if (logFile) {
     logFile.println("time,lat,lon,kmph,mph,altm,altft,sats,rpm,map,tps,clt,iat,batt");
     logFile.flush();
+    Serial.println("Trip header written");
+  } else {
+    Serial.println("Failed to open trip file");
   }
 }
 
 // ------------------------------
-// WIFI JSON STORAGE
+// WiFi JSON (SPIFFS) helpers
 // ------------------------------
-void loadNetworks() {
+void ensureWifiJsonExists() {
   if (!SPIFFS.exists(wifiFile)) {
-    DynamicJsonDocument doc(256);
-    doc["networks"] = JsonArray();
-    File f = SPIFFS.open(wifiFile, "w");
+    Serial.println("wifi.json not found, creating empty networks array");
+    StaticJsonDocument<256> doc;
+    JsonArray arr = doc.createNestedArray("networks");
+    (void)arr;
+
+    File f = SPIFFS.open(wifiFile, FILE_WRITE);
+    if (!f) {
+      Serial.println("Failed to create wifi.json");
+      return;
+    }
     serializeJson(doc, f);
     f.close();
   }
 }
 
 bool connectSavedNetworks() {
-  File f = SPIFFS.open(wifiFile, "r");
-  if (!f) return false;
+  if (!SPIFFS.exists(wifiFile)) {
+    Serial.println("wifi.json missing, cannot connect to saved networks");
+    return false;
+  }
 
-  DynamicJsonDocument doc(512);
-  if (deserializeJson(doc, f)) return false;
+  File f = SPIFFS.open(wifiFile, FILE_READ);
+  if (!f) {
+    Serial.println("Failed to open wifi.json for read");
+    return false;
+  }
+
+  StaticJsonDocument<512> doc;
+  DeserializationError err = deserializeJson(doc, f);
   f.close();
 
+  if (err) {
+    Serial.print("wifi.json parse error: ");
+    Serial.println(err.c_str());
+    return false;
+  }
+
   JsonArray arr = doc["networks"].as<JsonArray>();
+  if (arr.isNull()) {
+    Serial.println("wifi.json has no networks array");
+    return false;
+  }
 
   for (JsonObject o : arr) {
     String ss = o["ssid"].as<String>();
     String pw = o["pass"].as<String>();
 
+    Serial.print("Trying WiFi: ");
+    Serial.println(ss);
+
+    WiFi.mode(WIFI_STA);
     WiFi.begin(ss.c_str(), pw.c_str());
     unsigned long t = millis();
 
-    while (millis() - t < 7000) {
-      if (WiFi.status() == WL_CONNECTED) return true;
+    while (millis() - t < 8000) {
+      if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("WiFi connected");
+        Serial.print("IP: ");
+        Serial.println(WiFi.localIP());
+        if (MDNS.begin("logger")) {
+          Serial.println("mDNS started: http://logger.local");
+        } else {
+          Serial.println("mDNS start failed");
+        }
+        return true;
+      }
       delay(100);
     }
+
+    Serial.println("WiFi connect timeout, trying next network (if any)");
   }
+
   return false;
 }
 
-// AP fallback
 void startAPMode() {
+  Serial.println("Starting AP mode...");
   WiFi.mode(WIFI_AP);
   WiFi.softAP("LoggerSetup", "password");
+  IPAddress ip = WiFi.softAPIP();
+  Serial.print("AP mode, IP: ");
+  Serial.println(ip);
   WIFIOK = false;
 }
 
 // ------------------------------
-// HTML FALLBACK PAGES
+// HTML style + fallback pages
 // ------------------------------
 String neonStyle = R"(
 <style>
-body { background:black;color:#0f0;font-family:monospace;padding:20px; }
-h1 { color:#0f0;font-size:28px; }
-button,a { padding:12px 18px;margin:10px 0;display:block;
-  background:#111;border:1px solid #0f0;border-radius:6px;color:#0f0;
-  text-decoration:none;font-size:20px;text-align:center; }
-.box { border:1px solid #0f0;padding:15px;margin-bottom:20px; }
+body { background:#000; color:#0f0; font-family:monospace; padding:20px; }
+h1 { color:#0f0; font-size:26px; }
+a.btn, button {
+  display:inline-block; padding:10px 16px; margin:8px 4px;
+  background:#111; border:1px solid #0f0; border-radius:4px;
+  color:#0f0; text-decoration:none; font-size:18px;
+}
+.box {
+  border:1px solid #0f0; padding:12px; margin-bottom:16px;
+}
 </style>
 )";
 
-String wrapPage(String title, String body) {
-  return "<html><head>" + neonStyle + "</head><body><h1>" + title + "</h1>" +
-         body + "</body></html>";
+String wrapPage(const String &title, const String &body) {
+  String s;
+  s += "<html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+  s += neonStyle;
+  s += "<title>" + title + "</title></head><body>";
+  s += "<h1>" + title + "</h1>";
+  s += body;
+  s += "</body></html>";
+  return s;
 }
 
-// fallback homepage
-String pageHomeFallback() {
+String fallbackHome() {
   String out;
   out += "<div class='box'>";
-  out += "GPS " + String(GPSOK) + "<br>";
-  out += "CAN " + String(CANOK) + "<br>";
-  out += "SD " + String(SDOK) + "<br>";
-  out += "WiFi " + String(WIFIOK) + "<br>";
+  out += "GPS: " + String(GPSOK ? "OK" : "NO") + "<br>";
+  out += "CAN: " + String(CANOK ? "OK" : "NO") + "<br>";
+  out += "SD: "  + String(SDOK  ? "OK" : "NO") + "<br>";
+  out += "WiFi: " + String(WIFIOK ? "OK" : "NO") + "<br>";
   out += "</div>";
-  out += "<a href='/gps'>GPS</a>";
-  out += "<a href='/can'>CAN</a>";
-  out += "<a href='/wifi'>WiFi</a>";
-  out += "<a href='/files'>Files</a>";
+
+  out += "<a class='btn' href='/gps.html'>GPS</a>";
+  out += "<a class='btn' href='/can.html'>CAN</a>";
+  out += "<a class='btn' href='/files.html'>Files</a>";
+  out += "<a class='btn' href='/wifi.html'>WiFi</a>";
+  out += "<a class='btn' href='/ota.html'>OTA</a>";
+
   return wrapPage("Logger", out);
 }
 
 // ------------------------------
-// SD SERVING
+// SD file serving
 // ------------------------------
-bool serveSDFile(String path) {
-  if (!SD.exists(path)) return false;
+bool serveSDFile(const String &path) {
+  if (!SD.exists(path)) {
+    return false;
+  }
 
-  File f = SD.open(path, "r");
+  File f = SD.open(path, FILE_READ);
   if (!f) return false;
 
-  String type = "text/plain";
-  if (path.endsWith(".html")) type="text/html";
-  if (path.endsWith(".css")) type="text/css";
-  if (path.endsWith(".js")) type="application/javascript";
+  String contentType = "text/plain";
+  if (path.endsWith(".html")) contentType = "text/html";
+  else if (path.endsWith(".css")) contentType = "text/css";
+  else if (path.endsWith(".js")) contentType = "application/javascript";
+  else if (path.endsWith(".csv")) contentType = "text/csv";
 
-  server.streamFile(f, type);
+  server.streamFile(f, contentType);
   f.close();
   return true;
 }
 
 // ------------------------------
-// MAIN WEB ROUTES
+// Web handlers
 // ------------------------------
 void handleRoot() {
   if (!serveSDFile("/index.html")) {
-    server.send(200,"text/html",pageHomeFallback());
+    server.send(200, "text/html", fallbackHome());
   }
 }
 
 void handleGenericFile() {
   String path = server.uri();
-  if (!serveSDFile(path)) server.send(404,"text/plain","Not found");
+  if (!serveSDFile(path)) {
+    server.send(404, "text/plain", "Not found: " + path);
+  }
 }
 
 void handleAddWiFi() {
   if (!server.hasArg("ssid") || !server.hasArg("pass")) {
-    server.send(400,"text/plain","missing ssid/pass");
+    server.send(400, "text/plain", "Missing ssid/pass");
     return;
   }
 
   String ss = server.arg("ssid");
   String pw = server.arg("pass");
 
-  if (!SPIFFS.exists("/wifi.json")) {
-    DynamicJsonDocument d(256);
-    d["networks"]=JsonArray();
-    File f=SPIFFS.open("/wifi.json","w");
-    serializeJson(d,f);
-    f.close();
+  ensureWifiJsonExists();
+
+  File f = SPIFFS.open(wifiFile, FILE_READ);
+  if (!f) {
+    server.send(500, "text/plain", "Failed to open wifi.json");
+    return;
   }
 
-  File f = SPIFFS.open("/wifi.json","r");
-  DynamicJsonDocument doc(512);
-  deserializeJson(doc,f);
+  StaticJsonDocument<512> doc;
+  DeserializationError err = deserializeJson(doc, f);
   f.close();
+  if (err) {
+    server.send(500, "text/plain", "wifi.json parse error");
+    return;
+  }
 
-  JsonArray arr = doc["networks"];
-  JsonObject o = arr.createNestedObject();
-  o["ssid"]=ss;
-  o["pass"]=pw;
+  JsonArray arr = doc["networks"].as<JsonArray>();
+  if (arr.isNull()) {
+    arr = doc.createNestedArray("networks");
+  }
 
-  File w=SPIFFS.open("/wifi.json","w");
-  serializeJson(doc,w);
+  JsonObject obj = arr.createNestedObject();
+  obj["ssid"] = ss;
+  obj["pass"] = pw;
+
+  File w = SPIFFS.open(wifiFile, FILE_WRITE);
+  if (!w) {
+    server.send(500, "text/plain", "Failed to write wifi.json");
+    return;
+  }
+  serializeJson(doc, w);
   w.close();
 
-  server.sendHeader("Location","/wifi.html",true);
-  server.send(302,"text/plain","");
+  server.sendHeader("Location", "/wifi.html", true);
+  server.send(302, "text/plain", "OK");
 }
 
-// OTA upload
 void handleOTAUpload() {
-  HTTPUpload& up = server.upload();
-  if (up.status == UPLOAD_FILE_START) Update.begin();
-  else if (up.status == UPLOAD_FILE_WRITE) Update.write(up.buf, up.currentSize);
-  else if (up.status == UPLOAD_FILE_END) Update.end(true);
+  HTTPUpload &up = server.upload();
+  if (up.status == UPLOAD_FILE_START) {
+    Serial.println("OTA: begin");
+    if (!Update.begin()) {
+      Serial.println("OTA begin failed");
+    }
+  } else if (up.status == UPLOAD_FILE_WRITE) {
+    if (Update.write(up.buf, up.currentSize) != up.currentSize) {
+      Serial.println("OTA write failed");
+    }
+  } else if (up.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) {
+      Serial.println("OTA success, rebooting...");
+    } else {
+      Serial.println("OTA end failed");
+    }
+  }
 }
 
 // ------------------------------
-// OLED DISPLAY
+// OLED scrolling helpers
+// ------------------------------
+void drawScrollingLine(const String &text, int y, int lineIndex) {
+  if (lineIndex < 0 || lineIndex > 2) return;
+
+  int len = text.length();
+  int window = OLED_CHARS_PER_LINE;
+
+  // If it fits, no scroll needed
+  if (len <= window) {
+    lineOffset[lineIndex] = 0;
+    display.setCursor(0, y);
+    display.print(text);
+    return;
+  }
+
+  unsigned long now = millis();
+  if (now - lineLastStep[lineIndex] > SCROLL_INTERVAL) {
+    lineOffset[lineIndex]++;
+    if (lineOffset[lineIndex] > len) {
+      lineOffset[lineIndex] = 0;
+    }
+    lineLastStep[lineIndex] = now;
+  }
+
+  int start = lineOffset[lineIndex];
+  String view;
+
+  if (start + window <= len) {
+    view = text.substring(start, start + window);
+  } else {
+    int firstLen = len - start;
+    int secondLen = window - firstLen;
+    view = text.substring(start, len) + " " + text.substring(0, max(0, secondLen));
+  }
+
+  display.setCursor(0, y);
+  display.print(view);
+}
+
+// ------------------------------
+// OLED update
 // ------------------------------
 void updateOLED() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 
-  display.setCursor(0,0);
-  display.print("GPS ");
-  display.print(GPSOK?"OK ":"NO ");
-  display.print("CAN ");
-  display.print(CANOK?"OK":"NO");
+  // line 0: full status words
+  String statusLine = "GPS:" + String(GPSOK ? "OK " : "NO ") +
+                      "CAN:" + String(CANOK ? "OK " : "NO ") +
+                      "SD:"  + String(SDOK  ? "OK " : "NO ") +
+                      "WiFi:" + String(WIFIOK ? "OK" : "NO");
+  drawScrollingLine(statusLine, 0, 0);
 
-  display.setCursor(0,10);
-  display.print("SD ");
-  display.print(SDOK?"OK ":"NO ");
-  display.print("WiFi ");
-  display.print(WIFIOK?"OK":"NO");
+  // line 1: lat / lon
+  double lat = gps.location.isValid() ? gps.location.lat() : 0.0;
+  double lon = gps.location.isValid() ? gps.location.lng() : 0.0;
+  String latlon = "Lat:" + String(lat, 6) + " Lon:" + String(lon, 6);
+  drawScrollingLine(latlon, 10, 1);
 
-  display.setCursor(0,20);
-  display.print("LAT ");
-  display.print(gps.location.lat(),4);
-
-  display.setCursor(0,28);
-  display.print("LON ");
-  display.print(gps.location.lng(),4);
+  // line 2: speed / rpm / sats
+  double kmph = gps.speed.isValid() ? gps.speed.kmph() : fallbackSpeed;
+  double mph = kmph * 0.621371;
+  int sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
+  String info = "Speed:" + String(mph, 1) + "mph RPM:" + String(rpm) + " Sat:" + String(sats);
+  drawScrollingLine(info, 20, 2);
 
   display.display();
+}
+
+String formatUptime() {
+    unsigned long s = millis() / 1000;
+    unsigned long m = s / 60;
+    unsigned long h = m / 60;
+
+    char buf[20];
+    sprintf(buf, "%02uh:%02um:%02us", (unsigned)h, (unsigned)(m % 60), (unsigned)(s % 60));
+    return String(buf);
+}
+
+void bootMessage(const String &msg) {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.print(msg);
+    display.display();
 }
 
 // ------------------------------
@@ -324,47 +485,85 @@ void updateOLED() {
 // ------------------------------
 void setup() {
   Serial.begin(115200);
-  delay(1200);
+  delay(1000);
+  Serial.println();
+  Serial.println("=== ESP32 CAN/GPS Logger boot ===");
 
-  Wire.begin(21,22);
-  display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+  // init scroll state
+  for (int i = 0; i < 3; i++) {
+    lineOffset[i] = 0;
+    lineLastStep[i] = 0;
+  }
 
+  // OLED
+  Wire.begin(21, 22);
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+    Serial.println("OLED init failed");
+  } else {
+    Serial.println("OLED init OK");
+  }
+
+  // GPS
   SerialGPS.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
+  Serial.println("GPS UART started");
 
   // SPIFFS
-  SPIFFS.begin(false);
-  loadNetworks();
+  Serial.println("Mounting SPIFFS...");
+  if (!SPIFFS.begin(false)) {
+    Serial.println("SPIFFS mount failed, trying format");
+    if (SPIFFS.begin(true)) {
+      Serial.println("SPIFFS formatted and mounted");
+    } else {
+      Serial.println("SPIFFS still failed");
+    }
+  } else {
+    Serial.println("SPIFFS mount OK");
+  }
+  ensureWifiJsonExists();
 
   // SD
-  SPI.begin(18,19,23,SD_CS);
-  SDOK = SD.begin(SD_CS,SPI);
-  if (SDOK) startNewTrip();
+  Serial.println("Starting SD...");
+  SPI.begin(18, 19, 23, SD_CS);
+  SDOK = SD.begin(SD_CS, SPI);
+  Serial.print("SD status: ");
+  Serial.println(SDOK ? "OK" : "FAIL");
+  if (SDOK) {
+    startNewTrip();
+  }
 
   // CAN
-  CANOK = (CAN_MICRO.begin(MCP_ANY, CAN_500KBPS, MCP_16MHZ)==CAN_OK);
-  if (CANOK) CAN_MICRO.setMode(MCP_NORMAL);
-  pinMode(CAN_INT,INPUT);
+  Serial.println("Starting CAN...");
+  CANOK = (CAN_MICRO.begin(MCP_ANY, CAN_500KBPS, MCP_16MHZ) == CAN_OK);
+  if (CANOK) {
+    CAN_MICRO.setMode(MCP_NORMAL);
+    Serial.println("CAN init OK");
+  } else {
+    Serial.println("CAN init FAIL");
+  }
+  pinMode(CAN_INT, INPUT);
 
   // WiFi
+  Serial.println("Connecting WiFi...");
   if (connectSavedNetworks()) {
-    WIFIOK=true;
+    WIFIOK = true;
   } else {
     startAPMode();
   }
 
-  // WEB ROUTES
+  // Web routes
   server.on("/", handleRoot);
   server.on("/addwifi", handleAddWiFi);
-  server.on("/update", HTTP_POST, [](){
-    server.send(200,"text/plain","OK");
+  server.on("/update", HTTP_POST, []() {
+    server.send(200, "text/plain", "OTA done, rebooting");
     delay(500);
     ESP.restart();
   }, handleOTAUpload);
 
-  // Generic SD files
   server.onNotFound(handleGenericFile);
-
   server.begin();
+  Serial.println("HTTP server started");
+
+  updateOLED();
 }
 
 // ------------------------------
@@ -375,58 +574,62 @@ void loop() {
   server.handleClient();
 
   // GPS ingest
-  while (SerialGPS.available()) gps.encode(SerialGPS.read());
+  while (SerialGPS.available()) {
+    gps.encode(SerialGPS.read());
+  }
   GPSOK = gps.location.isValid();
 
-  unsigned long now=millis();
+  unsigned long now = millis();
 
-  // fallback speed
-  double kmph = gps.speed.isValid()?gps.speed.kmph():fallbackSpeed;
-
+  // speed fallback
+  double kmph = gps.speed.isValid() ? gps.speed.kmph() : fallbackSpeed;
   if (gps.speed.isValid()) {
-    fallbackSpeed=kmph;
-    lastGpsFix=now;
-  } else if (now-lastGpsFix > 1500) {
-    fallbackSpeed*=0.98;
+    fallbackSpeed = kmph;
+    lastGpsFix = now;
+  } else if (now - lastGpsFix > 1500) {
+    fallbackSpeed *= 0.98;
   }
 
-  // CAN read
+  // CAN read (Microsquirt 0x151 frame)
   if (!digitalRead(CAN_INT)) {
     unsigned long id;
-    byte len, buf[8];
-    CAN_MICRO.readMsgBuf(&id,&len,buf);
+    byte len;
+    byte buf[8];
+    CAN_MICRO.readMsgBuf(&id, &len, buf);
 
-    if (id==0x151) {
-      rpm  = (buf[1]<<8)|buf[0];
-      mapv = (buf[3]<<8)|buf[2];
+    if (id == 0x151 && len >= 7) {
+      rpm  = (buf[1] << 8) | buf[0];
+      mapv = (buf[3] << 8) | buf[2];
       tps  = buf[4];
       clt  = buf[5];
       iat  = buf[6];
-      batt = buf[7]*0.1;
-      lastCanMsg=now;
+      batt = buf[7] * 0.1f;
+
+      lastCanMsg = now;
       canCount++;
     }
   }
 
-  CANOK = (now-lastCanMsg < canTimeout);
+  CANOK = (now - lastCanMsg < canTimeout);
 
-  // SD LOGGING
-  if (SDOK && (now-lastWrite)>=writeRate) {
-    lastWrite=now;
+  // SD logging
+  if (SDOK && (now - lastWrite) >= writeRate) {
+    lastWrite = now;
+
     logFile.print(getTimeSeconds()); logFile.print(",");
-    logFile.print(gps.location.lat(),6); logFile.print(",");
-    logFile.print(gps.location.lng(),6); logFile.print(",");
-    logFile.print(kmph,2); logFile.print(",");
-    logFile.print(kmph*0.621371,2); logFile.print(",");
-    logFile.print(gps.altitude.meters(),1); logFile.print(",");
-    logFile.print(gps.altitude.meters()*3.28084,1); logFile.print(",");
+    logFile.print(gps.location.lat(), 6); logFile.print(",");
+    logFile.print(gps.location.lng(), 6); logFile.print(",");
+    logFile.print(kmph, 2); logFile.print(",");
+    logFile.print(kmph * 0.621371, 2); logFile.print(",");
+    logFile.print(gps.altitude.meters(), 1); logFile.print(",");
+    logFile.print(gps.altitude.meters() * 3.28084, 1); logFile.print(",");
     logFile.print(gps.satellites.value()); logFile.print(",");
     logFile.print(rpm); logFile.print(",");
     logFile.print(mapv); logFile.print(",");
     logFile.print(tps); logFile.print(",");
     logFile.print(clt); logFile.print(",");
     logFile.print(iat); logFile.print(",");
-    logFile.println(batt,1);
+    logFile.println(batt, 1);
     logFile.flush();
   }
 

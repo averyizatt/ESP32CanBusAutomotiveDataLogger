@@ -19,36 +19,55 @@
         </div>
       </div>
       <nav>
-        <button id="navToggle" class="nav-toggle" aria-expanded="false">☰</button>
         <div class="nav">
           <a href="can.html">CAN</a>
           <a href="gps.html">GPS</a>
           <a href="files.html">Files</a>
           <a href="wifi.html">WiFi</a>
           <a href="ota.html">OTA</a>
+          <a href="speedometer.html">Speedometer</a>
         </div>
       </nav>
     </header>
 
     <main>
-      <section class="card">
-        <h2>Status</h2>
-        <p id="statusBlock" class="muted">Loading…</p>
+      <section class="card race">
+        <div class="hud">
+          <div style="display:flex;align-items:center;gap:12px">
+            <div>
+              <div class="big-value" id="mph">--</div>
+              <div class="sub-value muted">Speed (mph)</div>
+            </div>
+            <svg id="gauge" width="120" height="64" viewBox="0 0 120 64" aria-hidden>
+              <defs>
+                <linearGradient id="g1"><stop offset="0%" stop-color="#ff3b3b"/><stop offset="100%" stop-color="#ffd166"/></linearGradient>
+              </defs>
+              <path d="M10 52 A50 50 0 0 1 110 52" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="8" stroke-linecap="round"></path>
+              <path d="M16 52 A44 44 0 0 1 104 52" fill="none" stroke="url(#g1)" stroke-width="6" stroke-linecap="round"></path>
+              <g id="needleGroup" transform="translate(60,52)">
+                <line id="gaugeNeedle" x1="0" y1="0" x2="0" y2="-36" stroke="#081010" stroke-width="3" stroke-linecap="round" style="transform-origin:60px 52px;transition:transform 220ms ease-out"></line>
+                <circle cx="0" cy="0" r="4" fill="#081010" stroke="#ffd166" stroke-width="2"></circle>
+              </g>
+            </svg>
+          </div>
+          <div style="text-align:right">
+            <div class="chip">Frames: <strong id="frames">--</strong></div>
+            <div style="height:8px"></div>
+            <div class="chip">Sat: <strong id="sats">--</strong></div>
+          </div>
+        </div>
       </section>
 
       <section class="card">
-        <h2>Live Data</h2>
+        <h2>Position</h2>
         <table class="table" aria-live="polite">
           <tr><td>Latitude</td><td id="lat">--</td></tr>
           <tr><td>Longitude</td><td id="lon">--</td></tr>
-          <tr><td>Speed (mph)</td><td id="mph">--</td></tr>
-          <tr><td>Satellites</td><td id="sats">--</td></tr>
-          <tr><td>CAN Frames</td><td id="frames">--</td></tr>
         </table>
       </section>
 
       <footer>
-        <small class="muted">ESP32 CAN Logger — local web UI</small>
+          <small class="muted">ESP32 CAN Logger — race-ready HUD skin — 1989 Ford Mustang Foxbody (built by Avery Izatt)</small>
       </footer>
     </main>
   </div>
