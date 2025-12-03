@@ -27,6 +27,16 @@
 #include <ArduinoJson.h>
 #include <SPIFFS.h>
 #include <time.h>
+#include <WebSocketsServer.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+
+// Forward declarations to avoid Arduino auto-prototype issues
+struct FrameRecord;
+extern File logFile;
+void broadcastFrame(const FrameRecord &fr);
+unsigned long getTimeSeconds();
+String nextTripPath();
 
 // ------------------------------
 // OLED
@@ -34,6 +44,105 @@
 #define OLED_ADDR 0x3C
 Adafruit_SSD1306 display(128, 32, &Wire, -1);
 bool OLED_INITED = false;
+
+// Web URL to display (mdns or IP or AP)
+String webURL = "";
+
+// --- Boot message queue (non-blocking) ---
+struct BootMsg { String text; unsigned long dur; };
+const int BOOT_QUEUE_LEN = 8;
+BootMsg bootQueue[BOOT_QUEUE_LEN];
+int bootHead = 0, bootTail = 0;
+bool bootActive = false;
+BootMsg currentBoot;
+unsigned long bootStartMillis = 0;
+
+// enqueue a boot message (overwrites oldest if full)
+void enqueueBootMessage(const String &txt, unsigned long durMs) {
+  bootQueue[bootTail] = {txt, durMs};
+  bootTail = (bootTail + 1) % BOOT_QUEUE_LEN;
+  if (bootTail == bootHead) { // full, drop oldest
+    bootHead = (bootHead + 1) % BOOT_QUEUE_LEN;
+  }
+}
+
+void processBootMessages() {
+  if (!OLED_INITED) return;
+  unsigned long now = millis();
+  if (!bootActive) {
+    if (bootHead != bootTail) {
+      currentBoot = bootQueue[bootHead];
+      bootHead = (bootHead + 1) % BOOT_QUEUE_LEN;
+      bootMessage(currentBoot.text);
+      bootStartMillis = now;
+      bootActive = true;
+    }
+  } else {
+    if (now - bootStartMillis >= currentBoot.dur) {
+      // clear and move on
+      display.clearDisplay(); display.display();
+      bootActive = false;
+    }
+  }
+}
+
+// --- WebSocket server for pushing frames/status ---
+WebSocketsServer webSocket = WebSocketsServer(81);
+
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  if (type == WStype_CONNECTED) {
+    IPAddress ip = webSocket.remoteIP(num);
+    Serial.print("WebSocket client connected: "); Serial.println(ip);
+  }
+}
+
+// helper to broadcast JSON text to all websocket clients
+// take by value because WebSocketsServer::broadcastTXT requires a non-const String&
+void wsBroadcast(String txt) {
+  webSocket.broadcastTXT(txt);
+}
+
+// --- SD writer task ---
+static QueueHandle_t sdQueue = NULL;
+const int SD_QUEUE_SIZE = 64;
+
+// enqueue a log line to be written by the SD writer task
+void sdEnqueueLog(const String &line) {
+  if (!sdQueue) return;
+  char *buf = (char*)malloc(line.length() + 1);
+  if (!buf) return;
+  strcpy(buf, line.c_str());
+  if (xQueueSend(sdQueue, &buf, 0) != pdTRUE) {
+    // queue full, drop oldest: receive one then send
+    char *old; if (xQueueReceive(sdQueue, &old, 0) == pdTRUE) { free(old); }
+    xQueueSend(sdQueue, &buf, 0);
+  }
+}
+
+void sdWriterTask(void *pvParameters) {
+  (void)pvParameters;
+  for (;;) {
+    char *buf = NULL;
+    if (xQueueReceive(sdQueue, &buf, portMAX_DELAY) == pdTRUE) {
+      if (buf) {
+        // ensure logFile open
+        if (!logFile) {
+          // attempt to (re)open using nextTripPath()
+          String fname = nextTripPath();
+          logFile = SD.open(fname, FILE_WRITE);
+          if (logFile) {
+            logFile.println("time,lat,lon,kmph,mph,altm,altft,sats,rpm,map,tps,clt,iat,batt");
+          }
+        }
+        if (logFile) {
+          logFile.println((const char*)buf);
+          logFile.flush();
+        }
+        free(buf);
+      }
+    }
+  }
+}
 
 // Character based scrolling for 3 lines
 const int OLED_CHARS_PER_LINE = 20;       // ~20 chars fit at textSize=1
@@ -98,6 +207,8 @@ void pushFrame(unsigned long id, const byte* buf, byte len) {
   framesBuf[idx].ts = getTimeSeconds();
   framesHead++;
   framesTotal++;
+  // broadcast this frame to any websocket clients (non-blocking)
+  broadcastFrame(framesBuf[idx]);
 }
 
 // ------------------------------
@@ -422,12 +533,15 @@ bool connectSavedNetworks() {
         Serial.println("WiFi connected");
         Serial.print("IP: ");
         Serial.println(WiFi.localIP());
-        if (MDNS.begin("logger")) {
-          Serial.println("mDNS started: http://logger.local");
-        } else {
-          Serial.println("mDNS start failed");
-        }
-        return true;
+          // try to start mDNS as logger.local; prefer the mDNS name as web URL
+          if (MDNS.begin("logger")) {
+            Serial.println("mDNS started: http://logger.local");
+            webURL = "http://logger.local";
+          } else {
+            Serial.println("mDNS start failed");
+            webURL = String("http://") + WiFi.localIP().toString();
+          }
+          return true;
       }
       delay(100);
     }
@@ -446,87 +560,28 @@ void startAPMode() {
   Serial.print("AP mode, IP: ");
   Serial.println(ip);
   WIFIOK = false;
+  webURL = String("http://") + ip.toString();
   if (OLED_INITED) {
     String msg = String("AP mode IP: ") + ip.toString();
-    bootMessage(msg);
-    delay(5000);
+    enqueueBootMessage(msg, 2000);
   }
 }
 
-// ------------------------------
-// HTML style + fallback pages
-// ------------------------------
-String neonStyle = R"(
-<style>
-body { background:#000; color:#0f0; font-family:monospace; padding:20px; }
-h1 { color:#0f0; font-size:26px; }
-a.btn, button {
-  display:inline-block; padding:10px 16px; margin:8px 4px;
-  background:#111; border:1px solid #0f0; border-radius:4px;
-  color:#0f0; text-decoration:none; font-size:18px;
-}
-.box {
-  border:1px solid #0f0; padding:12px; margin-bottom:16px;
-}
-</style>
-)";
-
-String wrapPage(const String &title, const String &body) {
-  String s;
-  s += "<html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
-  s += neonStyle;
-  s += "<title>" + title + "</title></head><body>";
-  s += "<h1>" + title + "</h1>";
-  s += body;
-  s += "</body></html>";
-  return s;
-}
-
-String fallbackHome() {
-  String out;
-  out += "<div class='box'>";
-  out += "GPS: " + String(GPSOK ? "OK" : "NO") + "<br>";
-  out += "CAN: " + String(CANOK ? "OK" : "NO") + "<br>";
-  out += "SD: "  + String(SDOK  ? "OK" : "NO") + "<br>";
-  out += "WiFi: " + String(WIFIOK ? "OK" : "NO") + "<br>";
-  out += "</div>";
-
-  out += "<a class='btn' href='/gps.html'>GPS</a>";
-  out += "<a class='btn' href='/can.html'>CAN</a>";
-  out += "<a class='btn' href='/files.html'>Files</a>";
-  out += "<a class='btn' href='/wifi.html'>WiFi</a>";
-  out += "<a class='btn' href='/ota.html'>OTA</a>";
-
-  return wrapPage("Logger", out);
-}
+// Note: fallback embedded pages removed to save SPIFFS/SPI flash space.
+// Web UI is served exclusively from the SD card. SPIFFS is still used
+// for small configuration files (wifi.json, admin token), but not for
+// web assets.
 
 // ------------------------------
 // SD file serving
 // ------------------------------
 bool serveSDFile(const String &path) {
-  // Try SPIFFS first (allow embedding web UI into firmware), then fall back to SD card.
+  // Serve web assets exclusively from the SD card. Do not use SPIFFS
+  // to avoid wasting flash space with embedded pages.
   String p = path;
   if (p == "/") p = "/index.html";
 
-  // SPIFFS
-  if (SPIFFS.exists(p)) {
-    File f = SPIFFS.open(p, FILE_READ);
-    if (f) {
-      String contentType = "text/plain";
-      if (p.endsWith(".html")) contentType = "text/html";
-      else if (p.endsWith(".css")) contentType = "text/css";
-      else if (p.endsWith(".js")) contentType = "application/javascript";
-      else if (p.endsWith(".csv")) contentType = "text/csv";
-      server.streamFile(f, contentType);
-      f.close();
-      return true;
-    }
-  }
-
-  // SD fallback
-  if (!SD.exists(p)) {
-    return false;
-  }
+  if (!SD.exists(p)) return false;
 
   File f = SD.open(p, FILE_READ);
   if (!f) return false;
@@ -547,7 +602,7 @@ bool serveSDFile(const String &path) {
 // ------------------------------
 void handleRoot() {
   if (!serveSDFile("/index.html")) {
-    server.send(200, "text/html", fallbackHome());
+    server.send(404, "text/plain", "Not found");
   }
 }
 
@@ -712,6 +767,17 @@ void updateOLED() {
   display.display();
 }
 
+// helper to broadcast a frame over WebSocket
+void broadcastFrame(const FrameRecord &fr) {
+  StaticJsonDocument<256> doc;
+  char idbuf[16]; sprintf(idbuf, "0x%lX", fr.id);
+  doc["id"] = idbuf;
+  doc["data"] = fr.data;
+  doc["ts"] = fr.ts;
+  String out; serializeJson(doc, out);
+  wsBroadcast(out);
+}
+
 String formatUptime() {
     unsigned long s = millis() / 1000;
     unsigned long m = s / 60;
@@ -752,12 +818,14 @@ void setup() {
   } else {
     OLED_INITED = true;
     Serial.println("OLED init OK");
+    // small delay to allow the OLED controller to power up and present the first frame
+    delay(200);
   }
 
   // GPS
   SerialGPS.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
   Serial.println("GPS UART started");
-  if (OLED_INITED) { bootMessage("GPS UART started"); delay(5000); }
+  if (OLED_INITED) { enqueueBootMessage("GPS UART started", 1500); }
 
   // SPIFFS
   Serial.println("Mounting SPIFFS...");
@@ -765,21 +833,20 @@ void setup() {
     Serial.println("SPIFFS mount failed, trying format");
     if (SPIFFS.begin(true)) {
       Serial.println("SPIFFS formatted and mounted");
-      if (OLED_INITED) { bootMessage("SPIFFS formatted and mounted"); delay(5000); }
+      if (OLED_INITED) { enqueueBootMessage("SPIFFS formatted and mounted", 1500); }
     } else {
       Serial.println("SPIFFS still failed");
     }
   } else {
     Serial.println("SPIFFS mount OK");
-    if (OLED_INITED) { bootMessage("SPIFFS mount OK"); delay(5000); }
+    if (OLED_INITED) { enqueueBootMessage("SPIFFS mount OK", 1000); }
   }
   ensureWifiJsonExists();
   ensureAdminTokenExists();
 
   // show startup messages on OLED with 5s pause each (only if OLED initialized)
   if (OLED_INITED) {
-    bootMessage("=== ESP32 CAN/GPS Logger boot ===");
-    delay(5000);
+    enqueueBootMessage("=== ESP32 CAN/GPS Logger boot ===", 1500);
   }
 
   // SD
@@ -788,7 +855,7 @@ void setup() {
   SDOK = SD.begin(SD_CS, SPI);
   Serial.print("SD status: ");
   Serial.println(SDOK ? "OK" : "FAIL");
-  if (OLED_INITED) { bootMessage(String("SD status: ") + (SDOK?"OK":"FAIL")); delay(5000); }
+  if (OLED_INITED) { enqueueBootMessage(String("SD status: ") + (SDOK?"OK":"FAIL"), 1500); }
   if (SDOK) {
     startNewTrip();
   }
@@ -796,13 +863,13 @@ void setup() {
   // CAN
   Serial.println("Starting CAN...");
   CANOK = (CAN_MICRO.begin(MCP_ANY, CAN_500KBPS, MCP_16MHZ) == CAN_OK);
-  if (CANOK) {
+    if (CANOK) {
     CAN_MICRO.setMode(MCP_NORMAL);
     Serial.println("CAN init OK");
-    if (OLED_INITED) { bootMessage("CAN init OK"); delay(5000); }
+    if (OLED_INITED) { enqueueBootMessage("CAN init OK", 1200); }
   } else {
     Serial.println("CAN init FAIL");
-    if (OLED_INITED) { bootMessage("CAN init FAIL"); delay(5000); }
+    if (OLED_INITED) { enqueueBootMessage("CAN init FAIL", 1200); }
   }
   pinMode(CAN_INT, INPUT);
 
@@ -810,9 +877,14 @@ void setup() {
   Serial.println("Connecting WiFi...");
   if (connectSavedNetworks()) {
     WIFIOK = true;
-    if (OLED_INITED) { bootMessage("WiFi connected"); delay(5000); }
+    if (OLED_INITED) { enqueueBootMessage("WiFi connected", 1200); }
   } else {
     startAPMode();
+  }
+
+  // Show the available web URL (mdns name or IP) so users can connect to the device
+  if (OLED_INITED && webURL.length() > 0) {
+    enqueueBootMessage(String("Open: ") + webURL, 2000);
   }
 
   // Web routes
@@ -968,7 +1040,17 @@ void setup() {
   server.onNotFound(handleGenericFile);
   server.begin();
   Serial.println("HTTP server started");
-  if (OLED_INITED) { bootMessage("HTTP server started"); delay(5000); }
+  if (OLED_INITED) { enqueueBootMessage("HTTP server started", 1000); }
+
+  // start WebSocket server
+  webSocket.begin();
+  webSocket.onEvent(webSocketEvent);
+
+  // create SD writer queue and task
+  sdQueue = xQueueCreate(SD_QUEUE_SIZE, sizeof(char*));
+  if (sdQueue) {
+    xTaskCreate(sdWriterTask, "sdWriter", 4096, NULL, 1, NULL);
+  }
 
   updateOLED();
 }
@@ -1024,22 +1106,24 @@ void loop() {
   // SD logging
   if (SDOK && (now - lastWrite) >= writeRate) {
     lastWrite = now;
-
-    logFile.print(getTimeSeconds()); logFile.print(",");
-    logFile.print(gps.location.lat(), 6); logFile.print(",");
-    logFile.print(gps.location.lng(), 6); logFile.print(",");
-    logFile.print(kmph, 2); logFile.print(",");
-    logFile.print(kmph * 0.621371, 2); logFile.print(",");
-    logFile.print(gps.altitude.meters(), 1); logFile.print(",");
-    logFile.print(gps.altitude.meters() * 3.28084, 1); logFile.print(",");
-    logFile.print(gps.satellites.value()); logFile.print(",");
-    logFile.print(rpm); logFile.print(",");
-    logFile.print(mapv); logFile.print(",");
-    logFile.print(tps); logFile.print(",");
-    logFile.print(clt); logFile.print(",");
-    logFile.print(iat); logFile.print(",");
-    logFile.println(batt, 1);
-    logFile.flush();
+    // enqueue log line for SD writer task (non-blocking)
+    String line;
+    line.reserve(256);
+    line += String(getTimeSeconds()); line += ",";
+    line += String(gps.location.lat(), 6); line += ",";
+    line += String(gps.location.lng(), 6); line += ",";
+    line += String(kmph, 2); line += ",";
+    line += String(kmph * 0.621371, 2); line += ",";
+    line += String(gps.altitude.meters(), 1); line += ",";
+    line += String(gps.altitude.meters() * 3.28084, 1); line += ",";
+    line += String(gps.satellites.value()); line += ",";
+    line += String(rpm); line += ",";
+    line += String(mapv); line += ",";
+    line += String(tps); line += ",";
+    line += String(clt); line += ",";
+    line += String(iat); line += ",";
+    line += String(batt, 1);
+    sdEnqueueLog(line);
   }
 
   updateOLED();
