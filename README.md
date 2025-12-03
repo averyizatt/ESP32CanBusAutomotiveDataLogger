@@ -1,7 +1,7 @@
 # ESP32 CAN/GPS Automotive Data Logger
 
 Overview
-This project implements an ESP32-based data logger that reads GPS (TinyGPSPlus) and CAN bus frames (MCP2515 via ) and logs structured CSV data to an SD card. The device hosts a web UI served from the SD card and provides API endpoints for a modern dashboard. The firmware supports OTA updates (protected by an admin token), mDNS advertising (logger.local), a small OLED (Adafruit SSD1306) for local status, and optional WebSocket streaming for live frames.
+This project implements an ESP32-based data logger that reads GPS (TinyGPSPlus) and CAN bus frames (MCP2515 via ) and logs structured CSV data to an SD card. The device hosts a web UI served from the SD card and provides API endpoints for a modern dashboard. The firmware supports OTA updates (protected by an admin token), mDNS advertising (), a small OLED (Adafruit SSD1306) for local status, and optional WebSocket streaming for live frames.
 
 Key features
 - CAN bus capture (MCP2515 driver via ) and parsed fields (RPM, TPS, MAP, temperatures, battery voltage).
@@ -37,7 +37,6 @@ Build & Deployment
 File layout (key files)
 -  — main firmware
 -  — web assets (index.html, script.js, style.css)
--  — additional notes
 
 Security & Operational Notes
 - Admin token is stored in SPIFFS (file ) — firmware checks this for OTA and admin operations.
