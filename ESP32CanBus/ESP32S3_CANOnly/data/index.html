@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>CAN Expander</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="script.js"></script>
+  <meta name="description" content="ESP32-S3 CAN expander web dashboard">
+</head>
+<body>
+  <div class="wrap">
+    <header class="site-header">
+      <div class="brand">
+        <div class="logo" aria-hidden></div>
+        <div>
+          <h1>CAN Expander</h1>
+          <p class="muted">ESP32-S3 — CAN-only dashboard</p>
+        </div>
+      </div>
+      <nav>
+        <div class="nav">
+          <a href="can.html">CAN</a>
+          <a href="wifi.html">WiFi</a>
+          <a href="ota.html">OTA</a>
+          <a href="settings.html">Settings</a>
+        </div>
+      </nav>
+    </header>
+
+    <main>
+      <section class="card race">
+        <div class="hud">
+          <div>
+            <div class="big-value" id="frames">--</div>
+            <div class="sub-value muted">Frames received</div>
+          </div>
+          <div style="text-align:right">
+            <div class="chip">CAN: <strong id="can">--</strong></div>
+            <div style="height:8px"></div>
+            <div class="chip">WiFi: <strong id="wifi">--</strong></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Status</h2>
+        <table class="table" aria-live="polite">
+          <tr><td>GPS</td><td id="gps">--</td></tr>
+          <tr><td>SD</td><td id="sd">--</td></tr>
+        </table>
+        <p class="muted" style="margin-top:10px">GPS and SD are disabled in this build.</p>
+      </section>
+
+      <footer>
+          <small class="muted">ESP32-S3 CAN Expander</small>
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

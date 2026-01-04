@@ -1,0 +1,74 @@
+ESP32-S3 CAN Expander — ESP-NOW Security + Usage
+
+Overview
+- This firmware can receive ESP-NOW packets from other ESP32 devices and forward them onto CAN (MCP2515).
+- To prevent random devices from injecting CAN frames, an allowlist (MAC address list) is enforced.
+
+Security Behavior (Default)
+- Allowlist is ENABLED.
+- If the allowlist is empty, the firmware accepts NOBODY by default.
+  - This is controlled by ESPNOW_ALLOW_ALL_IF_EMPTY (default 0).
+  - If you set ESPNOW_ALLOW_ALL_IF_EMPTY=1, then an empty list will accept everyone (NOT recommended in vehicles).
+- Packets must match the expected format (magic, version, DLC, and CAN ID bounds) or they are dropped.
+
+Persistence
+- Allowlist is stored in SPIFFS at:
+  /espnow_peers.json
+- The file is auto-created if missing.
+
+How to Configure (HTTP)
+All write operations require the same admin auth token used for OTA and WiFi management.
+
+1) List current peers
+- GET /espnow/peers
+
+2) Add a peer
+- POST /espnow/peers/add?mac=AA:BB:CC:DD:EE:FF&token=YOUR_ADMIN_TOKEN
+
+3) Remove a peer
+- POST /espnow/peers/del?mac=AA:BB:CC:DD:EE:FF&token=YOUR_ADMIN_TOKEN
+
+MAC string formats accepted
+- AA:BB:CC:DD:EE:FF
+- AABBCCDDEEFF
+
+Status / Debug
+- GET /status.json includes:
+  - espnow: OK/NO
+  - en_rx: total ESP-NOW packets received
+  - en_drop_na: dropped because MAC not in allowlist
+  - en_drop_bad: dropped because packet failed validation
+  - en_fwd_ok / en_fwd_fail: forwarded-to-CAN results
+  - en_last_mac: last sender MAC
+  - en_peers: allowlist count
+
+Packet Format (Sender -> Receiver)
+Your sensor node should send exactly sizeof(EspNowCanPacket) bytes.
+
+C struct used by receiver:
+
+  struct EspNowCanPacket {
+    uint32_t magic;   // 0x314E4143 = ASCII "CAN1" (little-endian)
+    uint8_t  version; // 1
+    uint8_t  ext;     // 0=11-bit, 1=29-bit
+    uint8_t  len;     // 0..8
+    uint8_t  reserved;
+    uint32_t can_id;
+    uint8_t  data[8];
+  };
+
+Validation rules
+- magic must be 0x314E4143
+- version must be 1
+- len must be <= 8
+- if ext==0 then can_id <= 0x7FF
+- if ext==1 then can_id <= 0x1FFFFFFF
+
+Notes
+- Forwarding is done from the main loop (not inside the ESP-NOW callback) to avoid doing SPI/CAN work in WiFi context.
+- ESP-NOW is kept active even when the device runs AP mode (WiFi mode is WIFI_AP_STA).
+
+Optional hardening you can add later (ask if you want it)
+- ESP-NOW encryption (PMK + per-peer LMK)
+- Per-peer CAN ID allowlists or rate limiting
+- Message authentication (HMAC) at the packet level

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>CAN Frames</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="script.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <header class="site-header">
+      <div class="brand">
+        <div class="logo" aria-hidden></div>
+        <div>
+          <h1>CAN Frames</h1>
+          <p class="muted">Live CAN bus frames</p>
+        </div>
+      </div>
+      <nav>
+        <div class="nav">
+          <a href="index.html">Dashboard</a>
+          <a href="wifi.html">WiFi</a>
+          <a href="ota.html">OTA</a>
+        </div>
+      </nav>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>Status</h2>
+        <p id="statusBlock" class="muted">Use the dashboard for status, frames update below…</p>
+      </section>
+
+      <section class="card">
+        <h2>Frames</h2>
+        <div class="frames-grid" id="framesGrid">
+          <div class="frame-row"><div class="frame-id">0x000</div><div class="muted">--</div></div>
+        </div>
+      </section>
+
+      <footer>
+        <a class="btn" href="index.html">Back</a>
+      </footer>
+    </main>
+  </div>
+</body>
+</html>
