@@ -1,0 +1,46 @@
+# ── PlatformIO ──────────────────────────────────────────────────────────────
+.pio/
+.pioenvs/
+.piolibdeps/
+.pio_build/
+
+# ── Arduino IDE ──────────────────────────────────────────────────────────────
+# Compiled output
+build/
+*.hex
+*.bin
+*.elf
+*.map
+
+# Sketch backup files
+*.ino.bak
+
+# ── VS Code ───────────────────────────────────────────────────────────────────
+.vscode/
+*.code-workspace
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ── Windows ───────────────────────────────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ── Linux ─────────────────────────────────────────────────────────────────────
+*~
+
+# ── Sensitive / user config ───────────────────────────────────────────────────
+# WiFi credentials or admin tokens should never be committed.
+# Prefer using a wifi.json / secrets.h (add those filenames here if you create them).
+wifi.json
+secrets.h
+credentials.h
+
+# ── Logs & temp files ─────────────────────────────────────────────────────────
+*.log
+*.tmp
